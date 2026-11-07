@@ -2,6 +2,14 @@
 set -euo pipefail
 cd "${0:A:h}"
 mkdir -p build
+python3 manage-g8-startup.py self-test
+if [[ "${1:-}" == "--install" ]]; then
+    agent="$HOME/Library/LaunchAgents/local.codex.g8-volume-keys.recovery.plist"
+    if [[ -e "$agent" ]] || launchctl print "gui/$(id -u)/local.codex.g8-volume-keys.recovery" >/dev/null 2>&1; then
+        print -u2 'Recovery is configured. Run python3 manage-g8-startup.py remove before replacing the app, then install again afterwards.'
+        exit 1
+    fi
+fi
 stage=$(mktemp -d "$PWD/build/stage.XXXXXX")
 app="$stage/G8 Volume.app"
 mkdir -p "$app/Contents/MacOS"
@@ -30,7 +38,19 @@ def digest(app):
 shutil.copytree(source, stage)
 run("/usr/bin/codesign", "--verify", "--strict", str(stage))
 assert digest(source) == digest(stage)
-pids = subprocess.run(["/usr/bin/pgrep", "-x", "G8VolumeKeys"], capture_output=True, text=True).stdout.split()
+agent = pathlib.Path.home() / "Library/LaunchAgents/local.codex.g8-volume-keys.recovery.plist"
+service = f"gui/{os.getuid()}/local.codex.g8-volume-keys.recovery"
+if agent.exists() or subprocess.run(["/bin/launchctl", "print", service], capture_output=True).returncode == 0:
+    raise SystemExit("Recovery was configured during the build; remove it before installing")
+matches = subprocess.run(["/usr/bin/pgrep", "-u", str(os.getuid()), "-x", "G8VolumeKeys"],
+                         capture_output=True, text=True)
+if matches.returncode not in (0, 1):
+    raise SystemExit("Cannot inspect old process; installation stopped")
+pids = []
+for pid in matches.stdout.split():
+    command = subprocess.run(["/bin/ps", "-p", pid, "-o", "comm="], capture_output=True, text=True)
+    if command.returncode == 0 and command.stdout.strip() == str(target / "Contents/MacOS/G8VolumeKeys"):
+        pids.append(pid)
 for pid in pids:
     try: os.kill(int(pid), 15)
     except ProcessLookupError: pass
